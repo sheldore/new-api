@@ -1,0 +1,67 @@
+name: new-api
+services:
+  new-api:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+    container_name: new-api
+    ports:
+      - "3000:3000"
+    command: --log-dir /app/logs
+    volumes:
+      - newapi_data:/data
+      - newapi_logs:/app/logs
+    environment:
+      SQL_DSN: postgresql://dreamfac:DreamfacDb2024!Secure@newapi-postgres:5432/new-api
+      REDIS_CONN_STRING: redis://newapi-redis
+      TZ: Asia/Shanghai
+      ERROR_LOG_ENABLED: "true"
+      BATCH_UPDATE_ENABLED: "true"
+      DREAMFAC_WEBHOOK_URL: ${DREAMFAC_WEBHOOK_URL:-http://dreamfac-admin-admin-app-1:3000/api/open/topup-notify}
+      DREAMFAC_API_SECRET: ${DREAMFAC_API_SECRET:-}
+    depends_on:
+      newapi-redis:
+        condition: service_started
+      newapi-postgres:
+        condition: service_healthy
+    networks:
+      - default
+      - dreamfac-net
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O - http://localhost:3000/api/status | grep -o '\"success\":\\s*true' || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  newapi-redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    networks:
+      - default
+
+  newapi-postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: dreamfac
+      POSTGRES_PASSWORD: DreamfacDb2024!Secure
+      POSTGRES_DB: new-api
+    volumes:
+      - newapi_pgdata:/var/lib/postgresql/data
+    networks:
+      - default
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U dreamfac -d new-api"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+networks:
+  dreamfac-net:
+    external: true
+
+volumes:
+  newapi_data:
+  newapi_logs:
+  newapi_pgdata:
