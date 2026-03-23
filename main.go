@@ -50,6 +50,9 @@ func main() {
 	}
 
 	common.SysLog("New API " + common.Version + " started")
+
+	// 注册 DreamFac 充值通知回调
+	model.RegisterDreamfacTopupNotifier(service.NotifyDreamfacTopup)
 	if os.Getenv("GIN_MODE") != "debug" {
 		gin.SetMode(gin.ReleaseMode)
 	}

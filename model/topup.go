@@ -11,6 +11,14 @@ import (
 	"gorm.io/gorm"
 )
 
+// notifyDreamfacTopupFunc 由 service 层注册，避免 model→service 循环依赖
+var notifyDreamfacTopupFunc = func(userId int, amount float64, tradeNo string) {}
+
+// RegisterDreamfacTopupNotifier 注册 DreamFac 充值通知回调
+func RegisterDreamfacTopupNotifier(fn func(userId int, amount float64, tradeNo string)) {
+	notifyDreamfacTopupFunc = fn
+}
+
 type TopUp struct {
 	Id            int     `json:"id"`
 	UserId        int     `json:"user_id" gorm:"index"`
@@ -100,6 +108,11 @@ func Recharge(referenceId string, customerId string) (err error) {
 	}
 
 	RecordLog(topUp.UserId, LogTypeTopup, fmt.Sprintf("使用在线充值成功，充值金额: %v，支付金额：%d", logger.FormatQuota(int(quota)), topUp.Amount))
+
+	// 通知 DreamFac 平台充值事件
+	if topUp.UserId > 0 {
+		go notifyDreamfacTopupFunc(topUp.UserId, topUp.Money, referenceId)
+	}
 
 	return nil
 }
@@ -373,6 +386,11 @@ func RechargeCreem(referenceId string, customerEmail string, customerName string
 	}
 
 	RecordLog(topUp.UserId, LogTypeTopup, fmt.Sprintf("使用Creem充值成功，充值额度: %v，支付金额：%.2f", quota, topUp.Money))
+
+	// 通知 DreamFac 平台充值事件
+	if topUp.UserId > 0 {
+		go notifyDreamfacTopupFunc(topUp.UserId, topUp.Money, referenceId)
+	}
 
 	return nil
 }

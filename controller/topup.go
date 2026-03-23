@@ -306,6 +306,8 @@ func EpayNotify(c *gin.Context) {
 			}
 			log.Printf("易支付回调更新用户成功 %v", topUp)
 			model.RecordLog(topUp.UserId, model.LogTypeTopup, fmt.Sprintf("使用在线充值成功，充值金额: %v，支付金额：%f", logger.LogQuota(quotaToAdd), topUp.Money))
+			// 通知 DreamFac 平台充值事件
+			go service.NotifyDreamfacTopup(topUp.UserId, topUp.Money, topUp.TradeNo)
 		}
 	} else {
 		log.Printf("易支付异常回调: %v", verifyInfo)
