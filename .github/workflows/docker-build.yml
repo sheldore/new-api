@@ -1,0 +1,40 @@
+name: Build and Push Docker Image
+
+on:
+  push:
+    branches: [ main, master, dreamfac-custom ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build Docker image
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          platforms: linux/amd64
+          push: false
+          load: true
+          tags: neo-api:dreamfac
+
+      - name: Save Docker image
+        run: |
+          docker save neo-api:dreamfac -o neo-api-dreamfac.tar
+          gzip neo-api-dreamfac.tar
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: neo-api-docker-image
+          path: neo-api-dreamfac.tar.gz
+          retention-days: 7
