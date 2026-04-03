@@ -26,7 +26,7 @@ func NotifyDreamfacTopup(userId int, amount float64, tradeNo string) {
 		return
 	}
 
-	payload := fmt.Sprintf(`{"casdoorUserId":"%s","amount":%.4f,"externalOrderId":"%s"}`,
+	payload := fmt.Sprintf(`{"ssoUserId":"%s","amount":%.4f,"externalOrderId":"%s"}`,
 		user.OidcId, amount, tradeNo)
 
 	req, err := http.NewRequest(http.MethodPost, webhookURL, bytes.NewBufferString(payload))
