@@ -1,55 +1,43 @@
-"""Deploy Neo-API to 8.130.94.182:3000."""
+"""Deploy Neo-API to 8.130.94.182:3000 from a prebuilt Docker artifact."""
 import os
 import sys
 import time
-import tarfile
+
 import paramiko
-from io import BytesIO
 
 sys.stdout.reconfigure(encoding='utf-8', errors='replace')
 sys.stderr.reconfigure(encoding='utf-8', errors='replace')
 
 HOST = '8.130.94.182'
 USER = 'root'
-KEY_FILE = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), '阿里云secret_key.pem')
+KEY_FILE = os.path.join(
+    os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
+    'secret_key.pem',
+)
 REMOTE_DIR = '/opt/neo-api'
-PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-
-EXCLUDE_DIRS = {
-    '.git', 'node_modules', '__pycache__', '.next', '.venv', 'venv',
-    'uploads', '.claude', 'openspec', 'web/node_modules',
-}
-EXCLUDE_FILES = {'.env.local', '.DS_Store', 'Thumbs.db', 'new-api'}
-EXCLUDE_EXTS = {'.pyc', '.pyo', '.log'}
+DEPLOY_DIR = os.path.dirname(os.path.abspath(__file__))
+PROJECT_ROOT = os.path.dirname(DEPLOY_DIR)
+ARTIFACT_NAME = 'neo-api-dreamfac.tar.gz'
+LOADED_IMAGE = 'ghcr.io/sheldore/new-api:dreamfac'
+COMPOSE_FILE = 'docker-compose.prod.yml'
 
 
-def should_include(path, name):
-    if name in EXCLUDE_DIRS or name in EXCLUDE_FILES:
-        return False
-    _, ext = os.path.splitext(name)
-    if ext in EXCLUDE_EXTS:
-        return False
-    return True
+def resolve_artifact_path():
+    candidates = []
+    if len(sys.argv) > 1:
+        candidates.append(sys.argv[1])
+    candidates.extend([
+        os.path.join(PROJECT_ROOT, ARTIFACT_NAME),
+        os.path.join(os.getcwd(), ARTIFACT_NAME),
+    ])
 
+    for path in candidates:
+        if path and os.path.isfile(path):
+            return os.path.abspath(path)
 
-def create_tarball(project_root):
-    buf = BytesIO()
-    with tarfile.open(fileobj=buf, mode='w:gz') as tar:
-        for root, dirs, files in os.walk(project_root):
-            dirs[:] = [d for d in dirs if should_include(root, d)]
-            for f in files:
-                if not should_include(root, f):
-                    continue
-                full_path = os.path.join(root, f)
-                arcname = os.path.relpath(full_path, project_root)
-                try:
-                    tar.add(full_path, arcname=arcname)
-                except (PermissionError, FileNotFoundError):
-                    pass
-    buf.seek(0)
-    size_mb = buf.getbuffer().nbytes / (1024 * 1024)
-    print(f'Tarball created: {size_mb:.1f} MB')
-    return buf
+    print(f'❌ Docker artifact not found: {ARTIFACT_NAME}')
+    print('Usage: python deploy/deploy.py /path/to/neo-api-dreamfac.tar.gz')
+    sys.exit(1)
 
 
 def connect():
@@ -74,117 +62,78 @@ def run_remote(client, cmd, timeout=600):
     if exit_code != 0:
         print(f'STDERR: {err[-2000:]}')
         print(f'Exit code: {exit_code}')
-    return exit_code
+    return exit_code, out, err
+
+
+def wait_for_status(client, url, attempts=24, delay=5):
+    for _ in range(attempts):
+        _, stdout, _ = client.exec_command(
+            f'curl -s -o /dev/null -w "%{{http_code}}" {url} 2>/dev/null || echo "000"'
+        )
+        status = stdout.read().decode().strip()
+        if status in ('200', '302'):
+            return status
+        time.sleep(delay)
+    return status
 
 
 def main():
+    artifact_path = resolve_artifact_path()
+    compose_path = os.path.join(DEPLOY_DIR, COMPOSE_FILE)
+    artifact_size_mb = os.path.getsize(artifact_path) / (1024 * 1024)
+
     print('=' * 55)
     print('  Neo-API Deploy to 8.130.94.182:3000')
     print('=' * 55)
 
-    # Step 1: Create tarball
-    print('\n[1/5] Creating project tarball...')
-    tarball = create_tarball(PROJECT_ROOT)
+    print('\n[1/5] Checking local artifact...')
+    print(f'Artifact: {artifact_path}')
+    print(f'Size: {artifact_size_mb:.1f} MB')
 
-    # Step 2: Connect via SSH key
     print('\n[2/5] Connecting to server...')
     client = connect()
 
-    # Configure Docker mirror (Alibaba Cloud)
-    run_remote(client, """
-mkdir -p /etc/docker
-cat > /etc/docker/daemon.json << 'EOF'
-{
-  "registry-mirrors": [
-    "https://registry.cn-hangzhou.aliyuncs.com"
-  ]
-}
-EOF
-systemctl daemon-reload
-systemctl restart docker
-echo 'Docker mirror configured'
-""")
-
-    # Step 3: Upload tarball
-    print('\n[3/5] Uploading project...')
-    run_remote(client, f'mkdir -p {REMOTE_DIR}')
+    print('\n[3/5] Uploading artifact and compose file...')
+    run_remote(client, f'mkdir -p {REMOTE_DIR}/deploy')
 
     sftp = client.open_sftp()
-    remote_tar = f'{REMOTE_DIR}/project.tar.gz'
-    with sftp.file(remote_tar, 'wb') as f:
-        f.set_pipelined(True)
-        data = tarball.read()
-        f.write(data)
-    print(f'Uploaded {len(data) / (1024 * 1024):.1f} MB')
+    remote_artifact = f'{REMOTE_DIR}/{ARTIFACT_NAME}'
+    remote_compose = f'{REMOTE_DIR}/deploy/{COMPOSE_FILE}'
+    sftp.put(artifact_path, remote_artifact)
+    sftp.put(compose_path, remote_compose)
+    print(f'Uploaded {ARTIFACT_NAME}')
+    print(f'Uploaded {COMPOSE_FILE}')
 
-    # Step 4: Extract
-    print('\n[4/5] Extracting...')
-    run_remote(client, f"""
+    print('\n[4/5] Loading image and restarting services...')
+    deploy_exit_code, _, _ = run_remote(client, f'''
 set -e
+mkdir -p {REMOTE_DIR}/deploy
 cd {REMOTE_DIR}
-tar xzf project.tar.gz
-rm project.tar.gz
-ls -la deploy/
-""")
-
-    # Step 5: Docker Compose build + up
-    print('\n[5/5] Building and starting services...')
-
-    run_remote(client, f"""
-cd {REMOTE_DIR}/deploy
-
-# Ensure external network exists
 docker network create dreamfac-net 2>/dev/null || true
-
-# Ensure external volumes exist
-docker volume create deploy_minidrama_pgdata 2>/dev/null || true
-docker volume create deploy_minidrama_minio 2>/dev/null || true
-
-docker compose down --remove-orphans 2>/dev/null || true
-
-nohup bash -c '
-  set -e
-  cd {REMOTE_DIR}/deploy
-  docker compose build 2>&1
-  docker compose up -d 2>&1
-  echo "DEPLOY_DONE"
-' > /tmp/neoapi_build.log 2>&1 &
-
-echo "Build started in background (PID: $!)"
-echo "Log: /tmp/neoapi_build.log"
-""")
-
-    # Poll build progress
-    print('\nWaiting for build to complete (this may take 15-30 minutes)...')
-    for i in range(120):  # 60 minutes max
-        time.sleep(30)
-        _, stdout, _ = client.exec_command('tail -5 /tmp/neoapi_build.log 2>/dev/null')
-        tail = stdout.read().decode('utf-8', errors='replace').strip()
-        last_line = tail.split('\n')[-1][:100] if tail else '...'
-        print(f'  [{(i+1)*30}s] {last_line}')
-
-        if 'DEPLOY_DONE' in tail:
-            print('\nBuild complete!')
-            break
-    else:
-        print('\nBuild timed out after 60 minutes')
-
-    # Check result
-    time.sleep(10)
-    run_remote(client, f"""
+gzip -dc {ARTIFACT_NAME} | docker load
 cd {REMOTE_DIR}/deploy
-docker compose ps
-echo ""
-echo "=== Last 30 lines of build log ==="
-tail -30 /tmp/neoapi_build.log
+docker compose -f {COMPOSE_FILE} down --remove-orphans 2>/dev/null || true
+docker compose -f {COMPOSE_FILE} up -d
+''', timeout=1800)
+    if deploy_exit_code != 0:
+        sftp.close()
+        client.close()
+        sys.exit(deploy_exit_code)
+
+    print('\n[5/5] Verifying deployment...')
+    verify_exit_code, _, _ = run_remote(client, f'''
+cd {REMOTE_DIR}/deploy
+docker compose -f {COMPOSE_FILE} ps
 echo ""
 echo "=== App logs ==="
-docker compose logs new-api --tail 15 2>/dev/null || true
-""")
+docker compose -f {COMPOSE_FILE} logs new-api --tail 30 2>/dev/null || true
+''')
+    if verify_exit_code != 0:
+        sftp.close()
+        client.close()
+        sys.exit(verify_exit_code)
 
-    # Verify app is responding
-    _, stdout, _ = client.exec_command('curl -s -o /dev/null -w "%{http_code}" http://localhost:3000/api/status 2>/dev/null || echo "000"')
-    status = stdout.read().decode().strip()
+    status = wait_for_status(client, 'http://localhost:3000/api/status')
 
     if status in ('200', '302'):
         print('\n' + '=' * 55)
@@ -193,7 +142,10 @@ docker compose logs new-api --tail 15 2>/dev/null || true
         print('=' * 55)
     else:
         print(f'\nApp returned HTTP {status} - may still be starting.')
-        print(f'Check: ssh -i <key> root@{HOST} "cd {REMOTE_DIR}/deploy && docker compose logs"')
+        print(
+            f'Check: ssh -i <key> root@{HOST} '
+            f'"cd {REMOTE_DIR}/deploy && docker compose -f {COMPOSE_FILE} logs"'
+        )
 
     sftp.close()
     client.close()

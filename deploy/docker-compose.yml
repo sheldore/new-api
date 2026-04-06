@@ -1,3 +1,5 @@
+# Deprecated: this compose file describes the old server-build deployment flow.
+# Use deploy/docker-compose.prod.yml with deploy/deploy.py and the neo-api-dreamfac.tar.gz artifact instead.
 name: new-api
 services:
   new-api:
